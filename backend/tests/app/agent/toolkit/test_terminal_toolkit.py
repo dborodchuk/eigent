@@ -28,7 +28,76 @@ from app.agent.toolkit.terminal_toolkit import (
     _isolated_local_command,
     _restore_isolated_commands_for_log,
 )
+from app.run_policy import ToolSafetyClass
+from app.run_runtime.tool_checkpoint import declared_tool_safety
 from app.service.task import TaskLock, task_locks
+
+
+@pytest.mark.parametrize(
+    "arguments, safe",
+    [
+        ({"command": "sleep 60", "timeout": 75}, True),
+        ({"command": " \tsleep 0.25\t "}, True),
+        ({"command": "sleep 0"}, True),
+        ({"command": "sleep 600", "timeout": 600}, True),
+        ({"command": "sleep 60"}, False),
+        ({"command": "sleep 1", "block": False}, False),
+        ({"command": "sleep 1", "block": 1}, False),
+        ({"command": "sleep 1", "timeout": True}, False),
+        ({"command": "sleep 1", "timeout": "20"}, False),
+        ({"command": "sleep 601", "timeout": 700}, False),
+        ({"command": "sleep -1"}, False),
+        ({"command": "sleep 1; touch result"}, False),
+        ({"command": "sleep 1 && echo done"}, False),
+        ({"command": "sleep 1\n"}, False),
+        ({"command": "sleep 1 > result"}, False),
+        ({"command": "sleep $(echo 1)"}, False),
+        ({"command": "sleep 1 &"}, False),
+        ({"command": "sleep 1 2"}, False),
+        ({"command": "/bin/sleep 1"}, False),
+    ],
+)
+def test_only_builtin_plain_wait_declares_safe_read(arguments, safe):
+    toolkit = TerminalToolkit.__new__(TerminalToolkit)
+    tools = toolkit.get_tools()
+    shell = next(
+        tool for tool in tools if tool.get_function_name() == "shell_exec"
+    )
+    expected = (
+        ToolSafetyClass.SAFE_READ if safe else ToolSafetyClass.UNSAFE_WRITE
+    )
+    assert declared_tool_safety(shell, "shell_exec", arguments) == (
+        expected,
+        None,
+    )
+    # Names and caller claims cannot grant the built-in declaration to MCP tools.
+    assert declared_tool_safety(object(), "shell_exec", arguments) == (
+        ToolSafetyClass.UNSAFE_WRITE,
+        None,
+    )
+
+
+def test_plain_wait_never_launches_shell_or_acquires_workspace_writer(
+    monkeypatch,
+):
+    toolkit = TerminalToolkit.__new__(TerminalToolkit)
+    sleep = MagicMock()
+    shell = MagicMock(side_effect=AssertionError("must not launch a shell"))
+    writer = MagicMock(side_effect=AssertionError("must not acquire a writer"))
+    monkeypatch.setattr(terminal_toolkit_module.time, "sleep", sleep)
+    monkeypatch.setattr(BaseTerminalToolkit, "shell_exec", shell)
+    monkeypatch.setattr(
+        terminal_toolkit_module,
+        "get_default_workspace_mutation_service",
+        writer,
+    )
+    result = toolkit._shell_exec_with_workspace_checkpoint(
+        "sleep 60", timeout=75
+    )
+    assert result == "Waited 60 seconds."
+    sleep.assert_called_once_with(60)
+    shell.assert_not_called()
+    writer.assert_not_called()
 
 
 @pytest.mark.unit

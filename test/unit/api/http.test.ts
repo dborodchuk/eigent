@@ -78,6 +78,28 @@ describe('api/http handleResponse', () => {
     await expect(fetchPost('/chat', { question: 'x' })).rejects.toThrow();
   });
 
+  it('shows the resume explanation while preserving the conflict code and blockers', async () => {
+    const detail = {
+      code: 'unsafe_resume_blocked',
+      message: 'A previous tool action has an unknown outcome.',
+      tool_call_ids: ['call-1'],
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ detail }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+
+    await expect(
+      fetchPost('/runs/run-1/resume', { request_id: 'resume-1' })
+    ).rejects.toMatchObject({
+      message: detail.message,
+      status: 409,
+      response: { data: { detail }, status: 409 },
+    });
+  });
+
   it('keeps code-based handling reachable for non-OK JSON responses', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ code: 20, text: 'insufficient credits' }), {

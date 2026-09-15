@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.run_context import RunContext, run_context_scope
-from app.run_journal import RunEventDraft, SQLiteRunJournal
+from app.run_journal import RunEventDraft, SQLiteRunJournal, UnsafeResumeError
 from app.run_policy import ToolSafetyClass
 from app.run_runtime.step_coordinator import PlanStepInput, RunStepCoordinator
 from app.run_runtime.tool_checkpoint import (
@@ -782,3 +782,97 @@ def test_tool_safety_declaration_does_not_swallow_unexpected_proxy_errors():
 
     with pytest.raises(RuntimeError, match="proxy declaration failed"):
         declare_tool_safety(ExplodingProxy(), ToolSafetyClass.SAFE_READ)
+
+
+@pytest.mark.parametrize("guard_result", [False, None, 1, "true"])
+def test_argument_guard_requires_explicit_true(guard_result):
+    class Tool:
+        pass
+
+    tool = declare_tool_safety(
+        Tool(),
+        ToolSafetyClass.SAFE_READ,
+        argument_guard=lambda arguments: guard_result,
+    )
+    assert declared_tool_safety(tool, "read_file", {}) == (
+        ToolSafetyClass.UNSAFE_WRITE,
+        None,
+    )
+
+
+def test_argument_guard_exception_fails_closed():
+    class Tool:
+        pass
+
+    def broken_guard(arguments):
+        raise ValueError("invalid arguments")
+
+    tool = declare_tool_safety(
+        Tool(), ToolSafetyClass.SAFE_READ, argument_guard=broken_guard
+    )
+    assert declared_tool_safety(tool, "shell_exec", {}) == (
+        ToolSafetyClass.UNSAFE_WRITE,
+        None,
+    )
+
+
+@pytest.mark.parametrize("command", ["sleep 60", "sleep 60; touch output.md"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_interrupted_builtin_wait_can_resume_but_arbitrary_shell_cannot(
+    tmp_path, command, restart
+):
+    from app.agent.toolkit.terminal_toolkit import TerminalToolkit
+
+    toolkit = TerminalToolkit.__new__(TerminalToolkit)
+    shell = next(
+        tool
+        for tool in toolkit.get_tools()
+        if tool.get_function_name() == "shell_exec"
+    )
+    arguments = {"command": command, "timeout": 75}
+    with _running_journal(tmp_path) as journal:
+        with run_context_scope(_context(tmp_path)):
+            checkpoint = prepare_tool_checkpoint(
+                raw_tool_call_id="wait-1",
+                tool_name="shell_exec",
+                arguments=arguments,
+                declared_safety=declared_tool_safety(
+                    shell, "shell_exec", arguments
+                ),
+                journal=journal,
+            )
+            if not restart:
+                if command == "sleep 60":
+                    finish_tool_checkpoint(
+                        checkpoint,
+                        error=TimeoutError("cancelled"),
+                        journal=journal,
+                    )
+                else:
+                    with pytest.raises(UnsafeToolOutcomeError):
+                        finish_tool_checkpoint(
+                            checkpoint,
+                            error=TimeoutError("cancelled"),
+                            journal=journal,
+                        )
+        if restart:
+            journal.reconcile_startup()
+        else:
+            journal.append_event(
+                "run-1",
+                RunEventDraft(
+                    event_id="interrupted",
+                    event_type="runtime.interrupted",
+                    payload={"reason": "test"},
+                ),
+            )
+        if command == "sleep 60":
+            resumed = journal.create_run_attempt(
+                "run-1", request_id="resume", reason="explicit_resume"
+            )
+            assert resumed.status == "pending"
+        else:
+            with pytest.raises(UnsafeResumeError):
+                journal.create_run_attempt(
+                    "run-1", request_id="resume", reason="explicit_resume"
+                )

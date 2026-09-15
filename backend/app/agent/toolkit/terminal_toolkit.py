@@ -38,8 +38,10 @@ from camel.toolkits.terminal_toolkit.terminal_toolkit import _to_plain
 from app.agent.toolkit.abstract_toolkit import AbstractToolkit
 from app.component.environment import env
 from app.run_journal import OutboxLeaseLostError
+from app.run_policy import ToolSafetyClass
 from app.run_runtime.tool_checkpoint import (
     ToolInvocationNotDispatchedError,
+    declare_tool_safety,
     get_current_tool_checkpoint,
 )
 from app.service.task import (
@@ -66,6 +68,35 @@ logger = logging.getLogger("terminal_toolkit")
 # App version - should match electron app version
 # TODO: Consider getting this from a shared config
 APP_VERSION = "1.0.4"
+
+
+def _plain_wait_seconds(arguments: dict) -> float | None:
+    """Recognize only bounded foreground waits executed without a shell."""
+    command = arguments.get("command")
+    if (
+        not isinstance(command, str)
+        or arguments.get("block", True) is not True
+    ):
+        return None
+    match = re.fullmatch(
+        r"[ \t]*sleep[ \t]+([0-9]+(?:\.[0-9]+)?)[ \t]*", command
+    )
+    if match is None:
+        return None
+    seconds = float(match[1])
+    timeout = arguments.get("timeout", 20.0)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 <= seconds <= 600
+        or not seconds <= timeout
+    ):
+        return None
+    return seconds
+
+
+def _is_plain_wait(arguments: dict) -> bool:
+    return _plain_wait_seconds(arguments) is not None
 
 
 _SECRET_BROKER_ENVIRONMENT_KEY = re.compile(
@@ -232,6 +263,17 @@ def _restore_isolated_commands_for_log(content: str) -> str:
 
 @auto_listen_toolkit(BaseTerminalToolkit)
 class TerminalToolkit(BaseTerminalToolkit, AbstractToolkit):
+    def get_tools(self):
+        tools = super().get_tools()
+        for tool in tools:
+            if tool.openai_tool_schema["function"]["name"] == "shell_exec":
+                declare_tool_safety(
+                    tool,
+                    ToolSafetyClass.SAFE_READ,
+                    argument_guard=_is_plain_wait,
+                )
+        return tools
+
     agent_name: str = Agents.developer_agent
 
     def __init__(
@@ -834,6 +876,16 @@ class TerminalToolkit(BaseTerminalToolkit, AbstractToolkit):
         block: bool = True,
         timeout: float = 20.0,
     ) -> str:
+        wait_seconds = _plain_wait_seconds(
+            {"command": command, "block": block, "timeout": timeout}
+        )
+        if wait_seconds is not None:
+            # Do not launch a shell, source profiles, resolve PATH executables,
+            # or acquire a workspace writer for a delay. The trusted safety
+            # declaration uses this exact predicate, so interrupted waits can
+            # be retried without authorizing replay of arbitrary shell work.
+            time.sleep(wait_seconds)
+            return f"Waited {wait_seconds:g} seconds."
         runtime_env_provider = getattr(self, "_runtime_env_provider", None)
         if runtime_env_provider is not None and not block:
             return (
@@ -844,8 +896,6 @@ class TerminalToolkit(BaseTerminalToolkit, AbstractToolkit):
 
         # Auto-generate ID if not provided
         if id is None:
-            import time
-
             id = f"auto_{int(time.time() * 1000)}"
 
         run_context = run_context_for_task(self.api_task_id)
