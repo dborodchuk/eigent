@@ -256,7 +256,11 @@ export function projectSnapshot(
       const existing = artifactManifestsByRun[runId];
       if (
         existing &&
-        (!manifest || existing.runSequence > manifest.runSequence)
+        (!manifest ||
+          existing.runSequence > manifest.runSequence ||
+          (existing.runSequence === manifest.runSequence &&
+            existing.frozenAfterInterruption &&
+            !manifest.frozenAfterInterruption))
       )
         continue;
       const previousById = new Map(
