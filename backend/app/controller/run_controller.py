@@ -680,12 +680,6 @@ def _control_error(exc: Exception) -> HTTPException:
             status_code=409,
             detail={
                 "code": "unsafe_resume_blocked",
-                "message": (
-                    "Resume is blocked because a previous tool action has an "
-                    "unknown outcome. Repeating it could duplicate changes. "
-                    "You can send a new task to inspect the existing work and "
-                    "continue only what remains."
-                ),
                 "tool_call_ids": list(exc.tool_call_ids),
             },
         )

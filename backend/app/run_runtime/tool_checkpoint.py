@@ -21,7 +21,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -64,7 +64,6 @@ _SAFE_READ_TOOL_NAMES = frozenset(
 _IDEMPOTENT_WRITE_TOOL_KEYS: dict[str, str] = {}
 _TOOL_SAFETY_ATTRIBUTE = "_eigent_tool_safety"
 _TOOL_IDEMPOTENCY_ARGUMENT_ATTRIBUTE = "_eigent_idempotency_argument"
-_TOOL_SAFETY_GUARD_ATTRIBUTE = "_eigent_tool_safety_guard"
 _MAX_CHECKPOINT_JSON_BYTES = 16_000
 _MAX_DISPLAY_TEXT_LENGTH = 600
 _MAX_DISPLAY_TITLE_LENGTH = 96
@@ -577,7 +576,6 @@ def declare_tool_safety(
     safety_class: ToolSafetyClass,
     *,
     idempotency_argument: str | None = None,
-    argument_guard: Callable[[dict[str, Any]], bool] | None = None,
 ) -> Any:
     """Attach a trusted safety declaration to a tool assembled by Eigent.
 
@@ -599,8 +597,6 @@ def declare_tool_safety(
         targets.append(wrapped)
     for target in targets:
         try:
-            if argument_guard is not None:
-                setattr(target, _TOOL_SAFETY_GUARD_ATTRIBUTE, argument_guard)
             # Write the key first so a partially writable proxy can never
             # expose an idempotent declaration without its required key.
             if idempotency_argument:
@@ -641,14 +637,6 @@ def declared_tool_safety(
             # Dynamic proxies/mocks may synthesize arbitrary attributes. Only
             # a valid, explicitly stored enum value is a trusted declaration.
             continue
-        guard = attributes.get(_TOOL_SAFETY_GUARD_ATTRIBUTE)
-        if guard is not None:
-            try:
-                allowed = callable(guard) and guard(arguments) is True
-            except Exception:
-                allowed = False
-            if not allowed:
-                return ToolSafetyClass.UNSAFE_WRITE, None
         if safety is not ToolSafetyClass.IDEMPOTENT_WRITE:
             return safety, None
         key_name = attributes.get(_TOOL_IDEMPOTENCY_ARGUMENT_ATTRIBUTE)

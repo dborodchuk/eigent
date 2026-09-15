@@ -21,23 +21,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.controller.run_controller import (
-    _control_error,
     _is_terminal,
     get_run,
     get_run_events,
     stream_run_events,
 )
-from app.run_journal import CommittedRunEvent, RunRecord, UnsafeResumeError
+from app.run_journal import CommittedRunEvent, RunRecord
 from app.run_runtime import RunCoordinator
-
-
-def test_unsafe_resume_error_explains_recovery_without_hiding_blocker():
-    error = _control_error(UnsafeResumeError(["call-1"]))
-    assert error.status_code == 409
-    assert error.detail["code"] == "unsafe_resume_blocked"
-    assert error.detail["tool_call_ids"] == ["call-1"]
-    assert "unknown outcome" in error.detail["message"]
-    assert "send a new task" in error.detail["message"]
 
 
 def _run_record() -> RunRecord:
